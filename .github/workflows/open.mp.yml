@@ -63,11 +63,21 @@ jobs:
       # directory worth caching. cmake-conan lives at lib/cmake-conan, not under
       # SDK/ -- pointing the key at paths that do not exist just weakens it,
       # since hashFiles silently ignores misses.
-      - name: Cache conan packages
-        uses: actions/cache@v4
+      # Computed in a step, not in workflow env: hashFiles would run before the
+      # checkout and hash nothing. cmake-conan is a submodule at lib/cmake-conan,
+      # not under SDK/ -- hashFiles ignores misses silently, so a wrong path
+      # weakens the key without ever failing.
+      - name: Compute the conan cache key
+        id: cachekey
+        run: |
+          echo "key=conan-linux-x86_64-dynssl-${{ hashFiles('open.mp/CMakeLists.txt', 'open.mp/lib/CMakeLists.txt', 'open.mp/SDK/CMakeLists.txt', 'open.mp/lib/cmake-conan/conan.cmake', 'open.mp/lib/cmake-conan/conan-omp.cmake') }}" >> "$GITHUB_OUTPUT"
+
+      - name: Restore conan cache
+        id: conan
+        uses: actions/cache/restore@v4
         with:
           path: open.mp/docker/conan2
-          key: conan-linux-x86_64-dynssl-${{ hashFiles('open.mp/CMakeLists.txt', 'open.mp/lib/CMakeLists.txt', 'open.mp/SDK/CMakeLists.txt', 'open.mp/lib/cmake-conan/conan.cmake', 'open.mp/lib/cmake-conan/conan-omp.cmake') }}
+          key: ${{ steps.cachekey.outputs.key }}
           restore-keys: conan-linux-x86_64-dynssl-
 
       # docker/build.sh runs the build inside an Ubuntu container — the same
@@ -100,6 +110,16 @@ jobs:
             exit 1
           }
 
+      # Saved here rather than as a job post-step: actions/cache skips saving when
+      # the job fails, and a failure while publishing would otherwise throw away
+      # the conan work the build just did.
+      - name: Save conan cache
+        if: steps.conan.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: open.mp/docker/conan2
+          key: ${{ steps.cachekey.outputs.key }}
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -114,6 +134,9 @@ jobs:
         run: |
           set -euo pipefail
           SERVER_DIR="open.mp/docker/build/Output/RelWithDebInfo/Server"
+          # build.sh produces this tree from inside a container, so it comes back
+          # owned by root and the runner cannot write into it.
+          sudo chown -R "$(id -u):$(id -g)" "$SERVER_DIR"
           test -s "$SERVER_DIR/omp-server"
           # plugins/ is not always produced; create it so COPY succeeds
           mkdir -p "$SERVER_DIR/plugins"

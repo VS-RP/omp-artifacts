@@ -59,11 +59,16 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
-      - name: Restore conan cache
+      # build.sh mounts $PWD/conan2 as the container's conan home, so that is the
+      # directory worth caching. cmake-conan lives at lib/cmake-conan, not under
+      # SDK/ -- pointing the key at paths that do not exist just weakens it,
+      # since hashFiles silently ignores misses.
+      - name: Cache conan packages
         uses: actions/cache@v4
         with:
-          path: open.mp/docker/conan/data
-          key: conan-linux-x86_64-dynssl-${{ hashFiles('open.mp/CMakeLists.txt', 'open.mp/lib/CMakeLists.txt', 'open.mp/SDK/CMakeLists.txt', 'open.mp/SDK/lib/cmake-conan/conan.cmake', 'open.mp/SDK/lib/cmake-conan/conan-omp.cmake') }}
+          path: open.mp/docker/conan2
+          key: conan-linux-x86_64-dynssl-${{ hashFiles('open.mp/CMakeLists.txt', 'open.mp/lib/CMakeLists.txt', 'open.mp/SDK/CMakeLists.txt', 'open.mp/lib/cmake-conan/conan.cmake', 'open.mp/lib/cmake-conan/conan-omp.cmake') }}
+          restore-keys: conan-linux-x86_64-dynssl-
 
       # docker/build.sh runs the build inside an Ubuntu container — the same
       # path upstream's own Linux CI uses, so anything that works there works
@@ -81,6 +86,19 @@ jobs:
           chmod +x build.sh
           find . -name 'docker-entrypoint.sh' -exec chmod +x {} +
           ./build.sh
+
+      # build.sh defaults TARGET_BUILD_ARCH to x86 when unset, and the whole
+      # VS:RP stack is 64-bit. A silently 32-bit server would only fail much
+      # later, at component load, so refuse to publish one.
+      - name: Verify the server binary is 64-bit
+        run: |
+          set -euo pipefail
+          BIN="open.mp/docker/build/Output/RelWithDebInfo/Server/omp-server"
+          file "$BIN"
+          file "$BIN" | grep -q 'ELF 64-bit' || {
+            echo "::error::omp-server is not ELF 64-bit -- TARGET_BUILD_ARCH did not take"
+            exit 1
+          }
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3

@@ -1,0 +1,105 @@
+# Repackages the CEF open.mp component into a scratch image with layout:
+#   /Cef.so              — the x64 Linux server component
+#
+# Consumed by VS-RP/server's Dockerfile (FROM ghcr.io/vs-rp/omp-cef).
+#
+# Nothing is compiled here. aurora-mp's own CI already builds Cef.so for x64
+# Linux and attaches it to each release, so this job downloads that asset and
+# wraps it. Building CEF from source through vcpkg would take far longer and
+# produce the same binary.
+
+name: omp-cef
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - versions.env
+      - .github/workflows/omp-cef.yml
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Override the aurora-mp/omp-cef release tag to repackage
+        required: false
+        type: string
+
+concurrency:
+  group: omp-cef-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  repackage-and-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout this repository
+        uses: actions/checkout@v4
+
+      - name: Resolve the upstream tag
+        id: pin
+        run: |
+          set -euo pipefail
+          . ./versions.env
+          TAG="${{ inputs.tag }}"
+          TAG="${TAG:-$OMPCEF_TAG}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Repackaging aurora-mp/omp-cef $TAG"
+
+      - name: Download the x64 server asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.pin.outputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p context download
+          gh release download "$TAG" \
+            --repo aurora-mp/omp-cef \
+            --pattern "cef-omp-*-x64.zip" \
+            --dir download
+          ls -la download
+
+      # The archive carries both the Windows and Linux binaries; we only want
+      # the Linux one. Fail loudly rather than publishing an empty image if the
+      # upstream layout ever changes.
+      - name: Extract Cef.so
+        run: |
+          set -euo pipefail
+          unzip -o download/*.zip -d unpacked
+          find unpacked -type f | sort
+          SO="$(find unpacked -type f -name 'Cef.so' | head -1)"
+          if [ -z "$SO" ]; then
+            echo "::error::No Cef.so in the release asset — upstream layout changed"
+            exit 1
+          fi
+          cp "$SO" context/Cef.so
+          test -s context/Cef.so
+          ls -la context
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Prepare image context
+        run: |
+          cat > context/Dockerfile << 'EOF'
+          FROM scratch
+          COPY Cef.so /Cef.so
+          EOF
+
+      - name: Build and push scratch image
+        uses: docker/build-push-action@v6
+        with:
+          context: context
+          push: true
+          tags: |
+            ghcr.io/vs-rp/omp-cef:latest
+            ghcr.io/vs-rp/omp-cef:${{ steps.pin.outputs.tag }}

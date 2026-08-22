@@ -1,0 +1,118 @@
+# Builds open.mp for linux x86_64 (RelWithDebInfo, dynamic SSL) from upstream
+# source and publishes a scratch image with layout:
+#   /omp-server          — server executable
+#   /components/*.so     — built-in components
+#   /plugins/*.so        — built-in pawn plugins
+#
+# Consumed by VS-RP/server's Dockerfile (FROM ghcr.io/vs-rp/open.mp).
+#
+# Upstream is checked out read-only at the pin in versions.env — we hold no
+# fork of open.mp and carry no patches against it.
+
+name: open.mp
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - versions.env
+      - .github/workflows/open.mp.yml
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Override the openmultiplayer/open.mp ref to build
+        required: false
+        type: string
+
+concurrency:
+  group: open.mp-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout this repository
+        uses: actions/checkout@v4
+
+      - name: Resolve the upstream ref
+        id: pin
+        run: |
+          set -euo pipefail
+          . ./versions.env
+          REF="${{ inputs.ref }}"
+          REF="${REF:-$OPENMP_REF}"
+          echo "ref=$REF"            >> "$GITHUB_OUTPUT"
+          echo "short=${REF:0:12}"   >> "$GITHUB_OUTPUT"
+          echo "Building openmultiplayer/open.mp at $REF"
+
+      - name: Checkout open.mp
+        uses: actions/checkout@v4
+        with:
+          repository: openmultiplayer/open.mp
+          ref: ${{ steps.pin.outputs.ref }}
+          path: open.mp
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Restore conan cache
+        uses: actions/cache@v4
+        with:
+          path: open.mp/docker/conan/data
+          key: conan-linux-x86_64-dynssl-${{ hashFiles('open.mp/CMakeLists.txt', 'open.mp/lib/CMakeLists.txt', 'open.mp/SDK/CMakeLists.txt', 'open.mp/SDK/lib/cmake-conan/conan.cmake', 'open.mp/SDK/lib/cmake-conan/conan-omp.cmake') }}
+
+      # docker/build.sh runs the build inside an Ubuntu container — the same
+      # path upstream's own Linux CI uses, so anything that works there works
+      # here.
+      - name: Build linux x86_64 (RelWithDebInfo, dynamic SSL)
+        working-directory: open.mp/docker
+        env:
+          CONFIG: RelWithDebInfo
+          UBUNTU_VERSION: 18.04
+          BUILD_SHARED: "true"
+          BUILD_SERVER: "1"
+          BUILD_TOOLS: "0"
+          TARGET_BUILD_ARCH: x86_64
+        run: |
+          chmod +x build.sh
+          find . -name 'docker-entrypoint.sh' -exec chmod +x {} +
+          ./build.sh
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Prepare image context
+        run: |
+          set -euo pipefail
+          SERVER_DIR="open.mp/docker/build/Output/RelWithDebInfo/Server"
+          test -s "$SERVER_DIR/omp-server"
+          # plugins/ is not always produced; create it so COPY succeeds
+          mkdir -p "$SERVER_DIR/plugins"
+          cat > "$SERVER_DIR/Dockerfile" << 'EOF'
+          FROM scratch
+          COPY omp-server /omp-server
+          COPY components/ /components/
+          COPY plugins/ /plugins/
+          EOF
+          echo "Packaging:"
+          ls -la "$SERVER_DIR" "$SERVER_DIR/components"
+
+      - name: Build and push scratch image
+        uses: docker/build-push-action@v6
+        with:
+          context: open.mp/docker/build/Output/RelWithDebInfo/Server
+          push: true
+          tags: |
+            ghcr.io/vs-rp/open.mp:latest
+            ghcr.io/vs-rp/open.mp:${{ steps.pin.outputs.short }}

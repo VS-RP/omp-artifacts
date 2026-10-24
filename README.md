@@ -13,11 +13,9 @@ divergence to track.
 ## Why these two are built here
 
 **open.mp** has to be compiled. Upstream releases ship `linux-x86` only, and the
-VS:RP stack is x86_64 throughout; the newest release is also several months
-behind master, missing a crash fix for servers that load no components and an
-axis bug in `NPC_SetAngleToPos`. So the pin is a master commit, and the build
-runs through upstream's own `docker/build.sh` — the same path their Linux CI
-uses.
+VS:RP stack is x86_64 throughout. The pin is the commit behind an upstream
+release tag (currently v1.6.7.3218), and the build runs through upstream's own
+`docker/build.sh` — the same path their Linux CI uses.
 
 **omp-cef** does not need compiling. aurora-mp's CI already produces the x64
 Linux `Cef.so` and attaches it to every release, so this job just downloads that
